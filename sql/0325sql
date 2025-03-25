@@ -505,4 +505,4 @@ from
             od.sku_tm_id, od.sku_category1_id, user_id, od.sku_category1_name
     ) mn
 group by mn.sku_tm_id, mn.sku_category1_id, mn.sku_category1_name
-;
+;.
