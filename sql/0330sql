@@ -1,0 +1,116 @@
+-- 1.ODS层（原始数据层）--
+CREATE TABLE ods_product_visit (
+                                   log_id STRING COMMENT '日志ID',
+                                   user_id STRING COMMENT '用户ID',
+                                   product_id STRING COMMENT '商品ID',
+                                   visit_time TIMESTAMP COMMENT '访问时间',
+                                   stay_duration BIGINT COMMENT '停留时长(秒)',
+                                   is_bounce INT COMMENT '是否跳出(0/1)',
+                                   is_collect INT COMMENT '是否收藏(0/1)',
+                                   is_add_cart INT COMMENT '是否加购(0/1)',
+                                   cart_num INT COMMENT '加购件数'
+) PARTITIONED BY (dt STRING)
+    STORED AS PARQUET;
+
+CREATE TABLE ods_order (
+                           order_id STRING COMMENT '订单ID',
+                           user_id STRING COMMENT '用户ID',
+                           product_id STRING COMMENT '商品ID',
+                           order_time TIMESTAMP COMMENT '下单时间',
+                           pay_time TIMESTAMP COMMENT '支付时间',
+                           order_amount DOUBLE COMMENT '订单金额',
+                           order_num INT COMMENT '购买件数',
+                           refund_amount DOUBLE COMMENT '退款金额'
+) PARTITIONED BY (dt STRING)
+    STORED AS PARQUET;
+
+-- 2.DWD层（明细数据层）--
+CREATE TABLE dwd_product_visit_detail (
+                                          visit_date STRING COMMENT '访问日期',
+                                          user_id STRING,
+                                          product_id STRING,
+                                          is_new_user INT COMMENT '是否新用户',
+                                          stay_duration BIGINT,
+                                          is_bounce INT,
+                                          is_collect INT,
+                                          is_add_cart INT,
+                                          cart_num INT
+) PARTITIONED BY (dt STRING)
+    STORED AS PARQUET;
+
+-- 数据清洗示例
+INSERT OVERWRITE TABLE dwd_product_visit_detail PARTITION(dt='2023-10-01')
+SELECT
+    DATE_FORMAT(visit_time,'yyyy-MM-dd'),
+    user_id,
+    product_id,
+    CASE WHEN first_visit_flag THEN 1 ELSE 0 END,
+    stay_duration,
+    is_bounce,
+    is_collect,
+    is_add_cart,
+    cart_num
+FROM ods_product_visit
+WHERE dt='2023-10-01' AND user_id IS NOT NULL;
+
+-- 3.DWS层（服务数据层）--
+CREATE TABLE dws_product_stats_day (
+                                       stat_date STRING COMMENT '统计日期',
+                                       product_id STRING,
+                                       visit_uv BIGINT COMMENT '访客数',
+                                       visit_pv BIGINT COMMENT '浏览量',
+                                       bounce_rate DOUBLE COMMENT '跳出率',
+                                       avg_stay_duration DOUBLE COMMENT '平均停留时长',
+                                       collect_uv BIGINT COMMENT '收藏人数',
+                                       add_cart_uv BIGINT COMMENT '加购人数',
+                                       pay_amount DOUBLE COMMENT '支付金额'
+) PARTITIONED BY (dt STRING)
+    STORED AS PARQUET;
+
+-- 数据聚合示例
+INSERT OVERWRITE TABLE dws_product_stats_day PARTITION(dt='2023-10-01')
+SELECT
+    visit_date,
+    product_id,
+    COUNT(DISTINCT user_id),
+    COUNT(1),
+    SUM(is_bounce)/COUNT(1),
+    AVG(stay_duration),
+    SUM(is_collect),
+    SUM(is_add_cart),
+    SUM(pay_info.amount)
+FROM dwd_product_visit_detail v
+         LEFT JOIN (
+    SELECT product_id,SUM(order_amount) amount
+    FROM dwd_order_detail
+    WHERE dt='2023-10-01'
+    GROUP BY product_id
+) pay_info ON v.product_id=pay_info.product_id
+WHERE v.dt='2023-10-01'
+GROUP BY visit_date,product_id;
+
+-- 4.ADS层（应用数据层）--
+CREATE TABLE ads_product_performance (
+                                         product_id STRING,
+                                         stat_date STRING,
+                                         visit_uv BIGINT,
+                                         pay_uv BIGINT,
+                                         pay_amount DOUBLE,
+                                         conversion_rate DOUBLE COMMENT '转化率',
+                                         avg_value DOUBLE COMMENT '访客价值',
+                                         competitive_score DOUBLE COMMENT '竞争力评分'
+) STORED AS PARQUET;
+
+
+INSERT OVERWRITE TABLE ads_product_performance
+SELECT
+    product_id,
+    stat_date,
+    visit_uv,
+    pay_uv,
+    pay_amount,
+    pay_uv/visit_uv AS conversion_rate,
+    pay_amount/visit_uv AS avg_value,
+    (pay_amount * 0.4 + (collect_uv + add_cart_uv) * 0.3 + ...) AS score -- 根据业务规则计算
+FROM dws_product_stats_day
+WHERE dt='2023-10-01';
